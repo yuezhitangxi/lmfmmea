@@ -126,7 +126,7 @@ class MultiModalEncoderMrFusion(nn.Module):
             self.node_size = ent_num
             self.rel_size = rel_size
             self.triple_size = triple_size
-            self.depth = 2
+            self.depth = self.args.Dual_num_layer
             self.adj_list = adj_matrix
             self.r_index = r_index
             self.r_val = r_val
@@ -172,12 +172,9 @@ class MultiModalEncoderMrFusion(nn.Module):
         self,
         input_idx,
         adj,
-        adj2,
         img_features=None,
         rel_features=None,
         att_features=None,
-        name_features=None,
-        char_features=None,
     ):
 
         if self.args.w_img:

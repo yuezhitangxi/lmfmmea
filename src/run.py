@@ -7,6 +7,11 @@ from __future__ import print_function
 
 import sys
 import os
+import copy
+import csv
+import gc
+import random
+import time
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
@@ -15,20 +20,38 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import argparse
 from pprint import pprint
 
+import numpy as np
+import scipy.spatial
+import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from transformers import (
     get_cosine_schedule_with_warmup,
 )
 try:
-    from utils import *
-    from models import *
-    from Load import *
-    from loss import *
-except:
-    from src.utils import *
-    from src.models import *
-    from src.Load import *
-    from src.loss import *
+    from utils import csls_sim, multi_get_hits, pairwise_distances, read_raw_data, get_adjr
+    from models import MultiModalEncoderMrFusion
+    from Load import (
+        get_ids,
+        load_attr,
+        load_data_dual,
+        load_img_new,
+        load_relation,
+        load_word_char_features,
+    )
+    from loss import CosFaceMarginLoss, CustomMultiLossLayer, InfoNCE_loss
+except ImportError:
+    from src.utils import csls_sim, multi_get_hits, pairwise_distances, read_raw_data, get_adjr
+    from src.models import MultiModalEncoderMrFusion
+    from src.Load import (
+        get_ids,
+        load_attr,
+        load_data_dual,
+        load_img_new,
+        load_relation,
+        load_word_char_features,
+    )
+    from src.loss import CosFaceMarginLoss, CustomMultiLossLayer, InfoNCE_loss
 
 
 
@@ -78,23 +101,17 @@ def select_device(device_arg, use_cuda):
 
 
 def load_img_features_use_mean_img(ent_num, file_dir, triples):
-    # load images features
     if "V1" in file_dir:
-        split = "norm"
         img_vec_path = "data/pkls/dbpedia_wikidata_15k_norm_GA_id_img_feature_dict.pkl"
     elif "V2" in file_dir:
-        split = "dense"
         img_vec_path = "data/pkls/dbpedia_wikidata_15k_dense_GA_id_img_feature_dict.pkl"
     elif "FBDB15K" in file_dir:
-        filename = os.path.split(file_dir)[-1].upper()
         img_vec_path = "data/mmkg/pkls/FBDB15K_id_img_feature_dict.pkl"
     else:
         split = file_dir.split("/")[-1]
         img_vec_path = "data/mmkg/pkls/" + split + "_GA_id_img_feature_dict.pkl"
 
-    img_vec_path = resolve_existing_path(img_vec_path)
-    img_features = load_img_new(ent_num, img_vec_path, triples)
-    return img_features
+    return load_img_new(ent_num, resolve_existing_path(img_vec_path), triples)
 
 
 class MyGram:
@@ -649,9 +666,6 @@ class MyGram:
         )  # getting a sparse tensor r_adj
         self.adj = self.adj.to(self.device)
 
-        self.adj2 = get_adjr2(self.ENT_NUM, self.triples, norm=True)
-        self.adj2 = self.adj2.to(self.device)
-
     def init_model(self):
         img_dim = self.img_features.shape[1]
         if "Dualmodal" in self.args.structure_encoder:
@@ -727,20 +741,25 @@ class MyGram:
                     bidirectional=self.args.use_bi_nce,
                 )
 
+    def encode_all_entities(self):
+        return self.multimodal_encoder(
+            self.input_idx,
+            self.adj,
+            self.img_features,
+            self.rel_features,
+            self.att_features,
+        )
+
+    def clear_memory(self):
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
     def semi_supervised_learning(self):
 
         with torch.no_grad():
             gph_emb1,gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb = (
-                self.multimodal_encoder(
-                    self.input_idx,
-                    self.adj,
-                    self.adj2,
-                    self.img_features,
-                    self.rel_features,
-                    self.att_features,
-                    self.name_features,
-                    self.char_features,
-                )
+                self.encode_all_entities()
             )
 
             final_emb = F.normalize(joint_emb)
@@ -756,7 +775,7 @@ class MyGram:
             preds_l = torch.argmin(distance, dim=1).cpu().numpy().tolist()
             preds_r = torch.argmin(distance.t(), dim=1).cpu().numpy().tolist()
             del distance_list, distance, final_emb
-            del gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb
+            del gph_emb1, gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb
         return preds_l, preds_r
 
     def alignment_loss(
@@ -816,16 +835,7 @@ class MyGram:
             self.optimizer.zero_grad()
 
             gph_emb1,gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb = (
-                self.multimodal_encoder(
-                    self.input_idx,
-                    self.adj,
-                    self.adj2,
-                    self.img_features,
-                    self.rel_features,
-                    self.att_features,
-                    self.name_features,
-                    self.char_features,
-                )
+                self.encode_all_entities()
             )
 
             if epoch==0:
@@ -858,9 +868,10 @@ class MyGram:
                     loss_list.append(align_loss)
                 loss_all = sum(loss_list)
                 print(" loss_all: {:f},".format(loss_all))
-                loss_all.backward(retain_graph=True)
+                retain_graph = bool(si + bsize < self.train_ill.shape[0])
+                loss_all.backward(retain_graph=retain_graph)
 
-                loss_sum_all += loss_all
+                loss_sum_all += loss_all.item()
 
             self.optimizer.step()
             print("[epoch {:d}] loss_all: {:f}".format(epoch, loss_sum_all))
@@ -927,11 +938,11 @@ class MyGram:
                 )
 
                 new_links = []
+            del gph_emb1, joint_emb, gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb
+            self.clear_memory()
             if (epoch + 1) % self.args.check_point == 0:
                 print("\n[epoch {:d}] checkpoint!".format(epoch))
                 self.test(epoch)
-
-            del joint_emb, gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb
 
         print("[optimization finished!]")
         print(
@@ -949,16 +960,7 @@ class MyGram:
                 self.multi_loss_layer.eval()
 
             gph_emb1,gph_emb, img_emb, rel_emb, att_emb, name_emb, char_emb, joint_emb = (
-                self.multimodal_encoder(
-                    self.input_idx,
-                    self.adj,
-                    self.adj2,
-                    self.img_features,
-                    self.rel_features,
-                    self.att_features,
-                    self.name_features,
-                    self.char_features,
-                )
+                self.encode_all_entities()
             )
 
             if self.args.use_ms_loss:
@@ -974,7 +976,7 @@ class MyGram:
                     Lvec, Rvec, top_k=top_k, args=self.args
                 )
                 del final_emb
-                gc.collect()
+                self.clear_memory()
             else:
                 acc_l2r = np.zeros((len(top_k)), dtype=np.float32)
                 acc_r2l = np.zeros((len(top_k)), dtype=np.float32)
@@ -1064,6 +1066,7 @@ class MyGram:
                     acc_r2l[i] = round(acc_r2l[i] / self.test_right.size(0), 4)
                 del (
                     distance,
+                    gph_emb1,
                     gph_emb,
                     img_emb,
                     rel_emb,
@@ -1072,7 +1075,7 @@ class MyGram:
                     char_emb,
                     joint_emb,
                 )
-                gc.collect()
+                self.clear_memory()
             print(
                 "l2r: acc of top {} = {}, mr = {:.3f}, mrr = {:.3f}, time = {:.4f} s ".format(
                     top_k, acc_l2r, mean_l2r, mrr_l2r, time.time() - t_test

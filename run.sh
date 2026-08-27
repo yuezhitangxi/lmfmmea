@@ -1,4 +1,6 @@
-gpu_id='1'
+#!/usr/bin/env bash
+
+gpu_id='0'
 # 'FB15K_DB15K' 'FB15K_YAGO15K' 'zh_en' 'ja_en' 'fr_en'
 dataset='FBDB15K'
 ratio=0.2
@@ -9,11 +11,12 @@ adapter_choice=0
 dropout=0.0
 rank=8
 use_GphForward=1
+dual_num_layer=2
 other_modal_type=0
 Is_LMFSoftmax=0
 joint_type=1
 mr_fusion_type=7
-final_fusion_type=(0)
+final_fusion_type=0
 if [[ "$dataset" == *"FB"* ]]; then
     dataset_dir='mmkg'
     tau=0.1
@@ -29,9 +32,14 @@ head_name=${current_datetime}_${dataset}
 file_name=${head_name}_${ratio}
 echo ${file_name}
 
+mkdir -p logs
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [ -x ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
+elif [ -x "/root/miniconda3/bin/python" ]; then
+    PYTHON_BIN="/root/miniconda3/bin/python"
 fi
 
 CUDA_VISIBLE_DEVICES=${gpu_id} "${PYTHON_BIN}" -u src/run.py \
@@ -72,6 +80,7 @@ CUDA_VISIBLE_DEVICES=${gpu_id} "${PYTHON_BIN}" -u src/run.py \
     --cosface_focal_gamma 0 \
     --cosface_t_max 0.1 \
     --cosface_warmup_epoch 50 \
+    --Dual_num_layer ${dual_num_layer} \
     --LMFrank ${rank} \
     --use_GphForward ${use_GphForward} \
     --add_other_modal ${other_modal_type} \
