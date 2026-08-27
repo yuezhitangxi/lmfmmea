@@ -33,6 +33,50 @@ except:
 
 
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def resolve_existing_path(path):
+    if path is None:
+        return path
+    candidates = []
+    if os.path.isabs(path):
+        candidates.append(path)
+    else:
+        candidates.extend(
+            [
+                os.path.abspath(path),
+                os.path.join(PROJECT_ROOT, path),
+            ]
+        )
+        if path.startswith("data/"):
+            candidates.append(os.path.join(PROJECT_ROOT, "..", path[len("data/") :]))
+        candidates.append(os.path.join(PROJECT_ROOT, "..", path))
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if os.path.exists(candidate):
+            return candidate
+    return path
+
+
+def select_device(device_arg, use_cuda):
+    if device_arg == "cuda" or (device_arg == "auto" and use_cuda):
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if device_arg == "cuda":
+            raise RuntimeError("CUDA was requested, but CUDA is not available.")
+    if device_arg in ("auto", "mps"):
+        if (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+            and torch.backends.mps.is_built()
+        ):
+            return torch.device("mps")
+        if device_arg == "mps":
+            raise RuntimeError("MPS was requested, but PyTorch MPS is not available.")
+    return torch.device("cpu")
+
+
 def load_img_features_use_mean_img(ent_num, file_dir, triples):
     # load images features
     if "V1" in file_dir:
@@ -43,13 +87,12 @@ def load_img_features_use_mean_img(ent_num, file_dir, triples):
         img_vec_path = "data/pkls/dbpedia_wikidata_15k_dense_GA_id_img_feature_dict.pkl"
     elif "FBDB15K" in file_dir:
         filename = os.path.split(file_dir)[-1].upper()
-        img_vec_path = (
-            "data/mmkg/pkls/FBDB15K_id_img_feature_dict.pkl"
-        )
+        img_vec_path = "data/mmkg/pkls/FBDB15K_id_img_feature_dict.pkl"
     else:
         split = file_dir.split("/")[-1]
         img_vec_path = "data/mmkg/pkls/" + split + "_GA_id_img_feature_dict.pkl"
 
+    img_vec_path = resolve_existing_path(img_vec_path)
     img_features = load_img_new(ent_num, img_vec_path, triples)
     return img_features
 
@@ -98,11 +141,11 @@ class MyGram:
         self.parser = argparse.ArgumentParser()
         self.args = self.parse_options(self.parser)
 
+        self.args.file_dir = resolve_existing_path(self.args.file_dir)
         self.set_seed(self.args.seed, self.args.cuda)
 
-        self.device = torch.device(
-            "cuda" if self.args.cuda and torch.cuda.is_available() else "cpu"
-        )
+        self.device = select_device(self.args.device, self.args.cuda)
+        print("using device:", self.device)
         self.init_data()
         self.init_model()
         self.best_hit_1 = 0.0
@@ -127,6 +170,12 @@ class MyGram:
             action="store_true",
             default=True,
             help="whether to use cuda or not",
+        )
+        parser.add_argument(
+            "--device",
+            choices=["auto", "cpu", "mps", "cuda"],
+            default="auto",
+            help="device to run on; use cpu for maximum Apple Silicon compatibility",
         )
         parser.add_argument("--seed", type=int, default=2021, help="random seed")
         parser.add_argument(
@@ -534,7 +583,7 @@ class MyGram:
 
         data_dir, dataname = os.path.split(file_dir)
         if self.args.word_embedding == "glove":
-            word2vec_path = "data/mmkg/embedding/glove.6B.300d.txt"
+            word2vec_path = resolve_existing_path("data/mmkg/embedding/glove.6B.300d.txt")
         elif self.args.word_embedding == "fasttext":
             pass
         else:
@@ -1051,8 +1100,7 @@ class MyGram:
                 import csv
 
                 save_path = os.path.join(self.args.save_path, pred_name)
-                if not os.path.exists(save_path):
-                    os.mkdir(save_path)
+                os.makedirs(save_path, exist_ok=True)
                 with open(os.path.join(save_path, pred_name + ".txt"), "w") as f:
                     wr = csv.writer(f, dialect="excel")
                     wr.writerows(self.best_to_write)

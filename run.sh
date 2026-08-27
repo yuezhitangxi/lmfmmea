@@ -28,7 +28,14 @@ current_datetime=$(date +"%Y-%m-%d-%H-%M")
 head_name=${current_datetime}_${dataset}
 file_name=${head_name}_${ratio}
 echo ${file_name}
-CUDA_VISIBLE_DEVICES=${gpu_id} python3 -u src/run.py \
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [ -x ".venv/bin/python" ]; then
+    PYTHON_BIN=".venv/bin/python"
+fi
+
+CUDA_VISIBLE_DEVICES=${gpu_id} "${PYTHON_BIN}" -u src/run.py \
+    --device cuda \
     --file_dir data/${dataset_dir}/${dataset}/norm \
     --pred_name ${file_name} \
     --rate ${ratio} \
